@@ -6,6 +6,7 @@ import socket
 from pprint import pprint
 from concurrent.futures import ThreadPoolExecutor
 import logging
+from paramiko.ssh_exception import SSHException
 
 
 logging.getLogger('paramiko').setLevel(logging.WARNING)
@@ -24,40 +25,51 @@ def send_show_command(
     max_bytes=60000,
     short_pause=1,
     long_pause=5,
-):
-    cl = paramiko.SSHClient()
-    cl.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    cl.connect(
-        hostname=ip,
-        username=username,
-        password=password,
-        look_for_keys=False,
-        allow_agent=False,
-    )
-    logging.info(f'Подключаюсь к {ip}')
-    with cl.invoke_shell() as ssh:
-        prompt = ssh.recv(max_bytes).decode('utf-8').replace('\r\n','')
-        logging.info(f'Зашёл на {prompt}')
-        ssh.send("terminal length 0\n")
-        time.sleep(short_pause)
-        ssh.recv(max_bytes)
+    read_timeout=10,
+                    ):
 
-        result = {}
-        for command in commands:
-            ssh.send(f"{command}\n")
-            ssh.settimeout(5)
+    try:
+        with paramiko.SSHClient() as connect:
+            connect.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            connect.connect(
+                hostname=ip,
+                username=username,
+                password=password,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            logging.info(f'Подключаюсь к {ip}')
 
-            output = ""
-            while True:
-                try:
-                    part = ssh.recv(max_bytes).decode("utf-8").replace('\r\n', '\n')
-                    output += part
-                    time.sleep(0.5)
-                except socket.timeout:
-                    break
-            result[command] = output
+            with connect.invoke_shell() as session:
+                prompt = session.recv(max_bytes).decode('utf-8').replace('\r\n','')
+                logging.info(f'Зашёл на {prompt}')
+                session.send("terminal length 0\n")
+                time.sleep(short_pause)
+                #print(session.recv(max_bytes))
+                result = {}
+                for command in commands:
+                    session.send(f"{command}\n")
+                    output = read_until(session, max_bytes,prompt, read_timeout)
+                    result[command] = output
+            return result
+    except (OSError, SSHException) as error:  # Для поиска проблем с подключением
+        return error
 
-        return result
+def read_until(session, max_bytes,prompt, read_timeout):
+    session.settimeout(read_timeout)
+    output = ""
+    while True:
+        time.sleep(0.2)
+        try:
+            part = session.recv(max_bytes).decode("utf-8").replace('\r\n', '\n')
+            output += part
+            time.sleep(0.5)
+            if prompt in output:
+               break
+        except socket.timeout:  # когда ожидаем вывода, но его нет
+            break
+    return output
+
 
 
 def send_command_to_devices(devices, username, password,
@@ -83,7 +95,7 @@ if __name__ == "__main__":
     commands = ["sh clock", "sh arp"]
     #for device in devices:
     #    result[device] = send_show_command(device, "cisco", "cisco",  commands)
-    pprint(send_command_to_devices(devices, username, password, commands), width=120)
+    pprint(send_command_to_devices(devices, username, password, commands, limit=3), width=120)
     print(f'Скрипт работал {datetime.now()-time_start}')
 
 '''send_show_command(
